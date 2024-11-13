@@ -22,7 +22,9 @@ az functionapp config appsettings set \
   "AZURE_OPENAI_KEY=your_key_here" \
   "AZURE_OPENAI_API_VERSION=2024-08-01-preview" \
   "AZURE_OPENAI_BASE_URL=https://your-instance.openai.azure.com/" \
-  "AZURE_OPENAI_MODEL=deployment-name"
+  "AZURE_OPENAI_MODEL=deployment-name" \
+  "AZURE_EVENTHUB_CONN_STR=your_eventhub_connection_string" \
+  "AZURE_EVENTHUB_NAME=openai-logs"
 ```
 
 ## Usage
@@ -125,3 +127,29 @@ View logs using Azure CLI:
 ```bash
 az functionapp logs tail --name fnsse --resource-group fnsse
 ```
+
+## Features
+
+### Event Hub Logging
+The function automatically logs completion details to Azure Event Hub, including:
+- Completion content
+- Token usage statistics
+- Model information
+- Azure region
+- Latency metrics
+- Original prompt
+#### Streaming response log example:
+```json
+{"type": "stream_completion", "content": "Singapore is a vibrant city-state located at the southern tip of the Malay Peninsula in Southeast Asia. Known for its impressive skyline, bustling port, and thriving financial sector, Singapore is a global commerce, finance, and transport hub. The country is renowned for its strict laws and immaculate cleanliness, contributing to its status as one of the safest and most orderly places in the world. It has a diverse, multicultural population comprising mainly Chinese, Malay, Indian, and expatriate communities, reflecting its historical role as a trade nexus. Renowned attractions such as Marina Bay Sands, Gardens by the Bay, and Sentosa Island draw millions of tourists annually, adding to its allure as a leading travel destination.", "usage": {"completion_tokens": 137, "prompt_tokens": 25, "total_tokens": 162, "completion_tokens_details": null, "prompt_tokens_details": null}, "model": "gpt-4o-2024-05-13", "prompt": [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": "tell me about Singapore in 5 sentences"}], "region": "Australia East", "latency_ms": 1306, "timestamp": "2024-11-13T06:59:30.584946"}
+```
+#### Non-streaming response log example:
+```json 
+{"type": "completion", "content": "Singapore is a sovereign city-state and island country in Southeast Asia. It is known for its highly developed free-market economy, which ranks as one of the most open and competitive globally. Despite its small geographical size, Singapore boasts a high standard of living and is a major financial hub with a strong international presence. The nation's strategic location has fostered a diverse, multicultural population, contributing to a rich cultural tapestry. Singapore is also recognized for its efficient and advanced infrastructure, including a world-renowned public transportation system and a highly regarded healthcare system.", "usage": {"completion_tokens": 106, "prompt_tokens": 25, "total_tokens": 131, "completion_tokens_details": null, "prompt_tokens_details": null}, "model": "gpt-4o-2024-05-13", "prompt": [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": "tell me about Singapore in 5 sentences"}], "region": "Australia East", "latency_ms": 1738, "timestamp": "2024-11-13T07:00:06.449374"}
+```
+
+
+### Region Tracking
+The function captures and logs the Azure region where the request was processed using response headers.
+
+### Latency Monitoring
+Request latency is tracked and logged for both streaming and non-streaming responses.

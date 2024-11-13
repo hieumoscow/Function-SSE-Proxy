@@ -3,8 +3,32 @@ import logging
 import json
 import os
 from openai import AzureOpenAI
+from azure.eventhub import EventHubProducerClient, EventData
+from datetime import datetime
+import httpx
+from typing import Any, Dict
+import time
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
+
+class HeaderCaptureClient(httpx.Client):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.last_headers = None
+
+    def send(self, request, *args, **kwargs):
+        response = super().send(request, *args, **kwargs)
+        self.last_headers = response.headers
+        return response
+
+def create_openai_client():
+    http_client = HeaderCaptureClient()
+    return AzureOpenAI(
+        api_key=os.environ["AZURE_OPENAI_KEY"],
+        api_version=os.environ["AZURE_OPENAI_API_VERSION"],
+        azure_endpoint=os.environ["AZURE_OPENAI_BASE_URL"],
+        http_client=http_client,
+    ), http_client
 
 @app.route(route="aoaifn")
 async def aoaifn(req: func.HttpRequest) -> func.HttpResponse:
@@ -17,12 +41,8 @@ async def aoaifn(req: func.HttpRequest) -> func.HttpResponse:
         # Get request parameters
         request_body = req.get_json()
         
-        # Initialize Azure OpenAI client
-        client = AzureOpenAI(
-            api_key=os.environ["AZURE_OPENAI_KEY"],
-            api_version=os.environ["AZURE_OPENAI_API_VERSION"],
-            azure_endpoint=os.environ["AZURE_OPENAI_BASE_URL"]
-        )
+        # Initialize client with header capture
+        client, http_client = create_openai_client()
 
         # Extract known parameters
         model = request_body.get("model", os.environ["AZURE_OPENAI_MODEL"])
@@ -35,6 +55,9 @@ async def aoaifn(req: func.HttpRequest) -> func.HttpResponse:
             if k not in ["model", "messages", "stream"]
         }
 
+        # Start timing before API call
+        start_time = time.time()
+
         # Create chat completion
         if stream:
             response = client.chat.completions.create(
@@ -43,7 +66,7 @@ async def aoaifn(req: func.HttpRequest) -> func.HttpResponse:
                 stream=True,
                 **extra_args
             )
-            return await process_openai_stream(response)
+            return await process_openai_stream(response, messages, http_client, start_time)
         else:
             response = client.chat.completions.create(
                 model=model,
@@ -51,7 +74,12 @@ async def aoaifn(req: func.HttpRequest) -> func.HttpResponse:
                 stream=False,
                 **extra_args
             )
-            return process_openai_sync(response)
+            # Calculate latency including API call
+            end_time = time.time()
+            latency_ms = int((end_time - start_time) * 1000)  # Convert to milliseconds
+            # Capture headers from the custom client
+            headers = http_client.last_headers
+            return process_openai_sync(response, messages, headers, latency_ms)
 
     except Exception as e:
         logging.error(f"Error in proxy function: {str(e)}")
@@ -61,20 +89,49 @@ async def aoaifn(req: func.HttpRequest) -> func.HttpResponse:
             headers={'Content-Type': 'application/json'}
         )
 
-def process_openai_sync(response):
+def log_to_eventhub(log_data: dict):
+    """Log data to Azure Event Hub"""
+    try:
+        if "AZURE_EVENTHUB_CONN_STR" not in os.environ:
+            logging.info("Event Hub connection string not configured, skipping event hub logging")
+            return
+
+        # Create producer
+        producer = EventHubProducerClient.from_connection_string(
+            conn_str=os.environ["AZURE_EVENTHUB_CONN_STR"],
+            eventhub_name=os.environ.get("AZURE_EVENTHUB_NAME", "openai-logs")
+        )
+
+        # Add timestamp to log data
+        log_data["timestamp"] = datetime.utcnow().isoformat()
+        event_data = EventData(json.dumps(log_data))
+
+        # Send event using the correct method
+        with producer:
+            batch = producer.create_batch()
+            batch.add(event_data)
+            producer.send_batch(batch)
+            
+    except Exception as e:
+        logging.error(f"Failed to log to Event Hub: {str(e)}")
+
+def process_openai_sync(response, messages, headers, latency_ms):
     """Process non-streaming response from OpenAI"""
     try:
-        # Log the complete message and usage
         content = response.choices[0].message.content
-        logging.info(f"Complete message: {content}")
         
         if response.usage:
-            logging.info(f"Usage details:")
-            logging.info(f"  Completion tokens: {response.usage.completion_tokens}")
-            logging.info(f"  Prompt tokens: {response.usage.prompt_tokens}")
-            logging.info(f"  Total tokens: {response.usage.total_tokens}")
+            log_data = {
+                "type": "completion",
+                "content": content,
+                "usage": response.usage.model_dump(),
+                "model": response.model,
+                "prompt": messages,
+                "region": headers.get("x-ms-region", "unknown"),
+                "latency_ms": latency_ms
+            }
+            log_to_eventhub(log_data)
 
-        # Return the response
         return func.HttpResponse(
             body=json.dumps(response.model_dump()),
             status_code=200,
@@ -89,9 +146,11 @@ def process_openai_sync(response):
             headers={'Content-Type': 'application/json'}
         )
 
-async def process_openai_stream(response):
+async def process_openai_stream(response, messages, http_client, start_time):
     """Process streaming response from OpenAI"""
-    processor = ResponseProcessor()
+    # Get headers from the initial response
+    headers = http_client.last_headers
+    processor = ResponseProcessor(messages, headers)
     response_body = []
 
     try:
@@ -99,6 +158,10 @@ async def process_openai_stream(response):
             chunk_text = processor.process_chunk(chunk)
             if chunk_text:
                 response_body.append(chunk_text)
+
+        # Calculate latency including API call
+        end_time = time.time()
+        latency_ms = int((end_time - start_time) * 1000)  # Convert to milliseconds
 
         return func.HttpResponse(
             body=''.join(response_body).encode('utf-8'),
@@ -118,16 +181,35 @@ async def process_openai_stream(response):
         )
 
 class ResponseProcessor:
-    def __init__(self):
+    def __init__(self, messages, headers):
         self.response_body = []
         self.all_chunks = []
+        self.messages = messages
+        self.region = headers.get("x-ms-region", "unknown")
+        self.start_time = time.time()
 
     def process_chunk(self, chunk):
         """Process individual chunk from OpenAI response"""
         try:
             # Handle usage data
             if hasattr(chunk, 'usage') and chunk.usage is not None:
-                logging.info(f"Complete message: {''.join(self.all_chunks)}")
+                end_time = time.time()
+                latency_ms = int((end_time - self.start_time) * 1000)  # Convert to milliseconds
+                complete_message = ''.join(self.all_chunks)
+                
+                log_data = {
+                    "type": "stream_completion",
+                    "content": complete_message,
+                    "usage": chunk.usage.model_dump(),
+                    "model": chunk.model,
+                    "prompt": self.messages,
+                    "region": self.region,
+                    "latency_ms": latency_ms
+                }
+                log_to_eventhub(log_data)
+
+                # Handle usage data
+                logging.info(f"Complete message: {complete_message}")
                 logging.info(f"Usage details:")
                 logging.info(f"  Completion tokens: {chunk.usage.completion_tokens}")
                 logging.info(f"  Prompt tokens: {chunk.usage.prompt_tokens}")
