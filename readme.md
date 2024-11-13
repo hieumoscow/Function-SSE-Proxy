@@ -63,7 +63,10 @@ POST /api/aoaifn
             "content": "Tell me about Singapore in 1 sentence"
         }
     ],
-    "stream": true
+    "stream": true,
+    "stream_options": {
+        "include_usage": true
+    }
 }
 ```
 
