@@ -7,3 +7,4 @@ aiohttp
 azure-eventhub
 openai>=1.0.0
 azure-eventhub
+azurefunctions-extensions-http-fastapi

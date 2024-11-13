@@ -8,6 +8,8 @@ from datetime import datetime
 import httpx
 from typing import Any, Dict
 import time
+import asyncio
+from azurefunctions.extensions.http.fastapi import Request, StreamingResponse
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
@@ -30,8 +32,8 @@ def create_openai_client():
         http_client=http_client,
     ), http_client
 
-@app.route(route="aoaifn")
-async def aoaifn(req: func.HttpRequest) -> func.HttpResponse:
+@app.route(route="aoaifn", methods=[func.HttpMethod.POST])
+async def aoaifn(req: Request) -> StreamingResponse:
     """
     Azure OpenAI Function that proxies requests to Azure OpenAI API with streaming support.
     """
@@ -39,7 +41,7 @@ async def aoaifn(req: func.HttpRequest) -> func.HttpResponse:
     
     try:
         # Get request parameters
-        request_body = req.get_json()
+        request_body = await req.json()
         
         # Initialize client with header capture
         client, http_client = create_openai_client()
@@ -148,37 +150,24 @@ def process_openai_sync(response, messages, headers, latency_ms):
 
 async def process_openai_stream(response, messages, http_client, start_time):
     """Process streaming response from OpenAI"""
-    # Get headers from the initial response
     headers = http_client.last_headers
     processor = ResponseProcessor(messages, headers)
-    response_body = []
 
-    try:
+    async def generate():
         for chunk in response:
             chunk_text = processor.process_chunk(chunk)
             if chunk_text:
-                response_body.append(chunk_text)
+                yield chunk_text
 
-        # Calculate latency including API call
-        end_time = time.time()
-        latency_ms = int((end_time - start_time) * 1000)  # Convert to milliseconds
-
-        return func.HttpResponse(
-            body=''.join(response_body).encode('utf-8'),
-            status_code=200,
-            headers={
-                'Content-Type': 'text/event-stream',
-                'Cache-Control': 'no-cache',
-                'Connection': 'keep-alive'
-            }
-        )
-    except Exception as e:
-        logging.error(f"Error processing stream: {str(e)}")
-        return func.HttpResponse(
-            body=json.dumps({"error": str(e)}),
-            status_code=500,
-            headers={'Content-Type': 'application/json'}
-        )
+    return StreamingResponse(
+        generate(),
+        media_type='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+        }
+    )
 
 class ResponseProcessor:
     def __init__(self, messages, headers):

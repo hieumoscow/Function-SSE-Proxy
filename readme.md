@@ -97,7 +97,7 @@ POST /api/aoaifn
 ```
 
 #### Streaming Response
-Server-Sent Events (SSE) format with content chunks and usage data:
+The function now uses FastAPI's StreamingResponse for improved streaming handling. The response format remains the same:
 ```
 data: {"choices":[{"delta":{"role":"assistant"},"index":0}]}
 
@@ -112,10 +112,18 @@ data: {"usage":{"completion_tokens":31,"prompt_tokens":25,"total_tokens":56}}
 data: [DONE]
 ```
 
+The streaming response includes proper SSE headers:
+- `Content-Type: text/event-stream`
+- `Cache-Control: no-cache`
+- `Connection: keep-alive`
+- `X-Accel-Buffering: no`
+
 ## Dependencies
 - Python 3.9+
 - `openai>=1.0.0`
 - `azure-functions`
+- `azure.functions.extensions.http.fastapi`
+- `httpx`
 
 ## Deployment
 ```bash
