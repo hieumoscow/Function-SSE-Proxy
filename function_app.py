@@ -10,6 +10,7 @@ from typing import Any, Dict
 import time
 import asyncio
 from azurefunctions.extensions.http.fastapi import Request, StreamingResponse
+from fastapi.responses import JSONResponse
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
@@ -32,30 +33,49 @@ def create_openai_client():
         http_client=http_client,
     ), http_client
 
-@app.route(route="aoaifn", methods=[func.HttpMethod.POST])
+@app.route(route="openai/deployments/{deployment_name}/chat/completions", methods=[func.HttpMethod.POST])
 async def aoaifn(req: Request) -> StreamingResponse:
     """
     Azure OpenAI Function that proxies requests to Azure OpenAI API with streaming support.
+    Matches the official Azure OpenAI API signature.
     """
     logging.info('Processing OpenAI proxy request')
     
     try:
         # Get request parameters
         request_body = await req.json()
+        logging.info(f"Request body: {json.dumps(request_body)}")  # Log the request body
         
+        # Get API version from query parameters
+        api_version = req.query_params.get("api-version")
+        if not api_version:
+            return JSONResponse(
+                content={"error": "api-version is required"},
+                status_code=400
+            )
+
+        # Get deployment name from path parameters
+        deployment_name = req.path_params.get("deployment_name")
+        if not deployment_name:
+            return JSONResponse(
+                content={"error": "deployment_name is required"},
+                status_code=400
+            )
+
         # Initialize client with header capture
         client, http_client = create_openai_client()
 
-        # Extract known parameters
-        model = request_body.get("model", os.environ["AZURE_OPENAI_MODEL"])
+        # Extract stream parameter
         messages = request_body["messages"]
-        stream = request_body.get("stream", False)  # Default to non-streaming
+        stream = request_body.get("stream", False)
         
-        # Filter out known parameters for additional args
+        # Filter out only the stream parameter for extra args
         extra_args = {
             k: v for k, v in request_body.items() 
-            if k not in ["model", "messages", "stream"]
+            if k not in ["messages", "stream"]  # Remove stream_options from the filter
         }
+        
+        logging.info(f"Extra args being passed to OpenAI: {json.dumps(extra_args)}")  # Log extra args
 
         # Start timing before API call
         start_time = time.time()
@@ -63,32 +83,30 @@ async def aoaifn(req: Request) -> StreamingResponse:
         # Create chat completion
         if stream:
             response = client.chat.completions.create(
-                model=model,
+                model=deployment_name,
                 messages=messages,
                 stream=True,
-                **extra_args
+                **extra_args  # This will now include stream_options
             )
             return await process_openai_stream(response, messages, http_client, start_time)
         else:
             response = client.chat.completions.create(
-                model=model,
+                model=deployment_name,
                 messages=messages,
                 stream=False,
                 **extra_args
             )
             # Calculate latency including API call
             end_time = time.time()
-            latency_ms = int((end_time - start_time) * 1000)  # Convert to milliseconds
-            # Capture headers from the custom client
+            latency_ms = int((end_time - start_time) * 1000)
             headers = http_client.last_headers
             return process_openai_sync(response, messages, headers, latency_ms)
 
     except Exception as e:
         logging.error(f"Error in proxy function: {str(e)}")
-        return func.HttpResponse(
-            body=json.dumps({"error": str(e)}),
-            status_code=500,
-            headers={'Content-Type': 'application/json'}
+        return JSONResponse(
+            content={"error": str(e)},
+            status_code=500
         )
 
 def log_to_eventhub(log_data: dict):
@@ -134,103 +152,82 @@ def process_openai_sync(response, messages, headers, latency_ms):
             }
             log_to_eventhub(log_data)
 
-        return func.HttpResponse(
-            body=json.dumps(response.model_dump()),
-            status_code=200,
-            headers={'Content-Type': 'application/json'}
+        # Return JSONResponse directly
+        return JSONResponse(
+            content=response.model_dump(),
+            headers={
+                'x-ms-region': headers.get("x-ms-region", "unknown")
+            }
         )
 
     except Exception as e:
         logging.error(f"Error processing sync response: {str(e)}")
-        return func.HttpResponse(
-            body=json.dumps({"error": str(e)}),
-            status_code=500,
-            headers={'Content-Type': 'application/json'}
+        return JSONResponse(
+            content={"error": str(e)},
+            status_code=500
         )
 
 async def process_openai_stream(response, messages, http_client, start_time):
     """Process streaming response from OpenAI"""
     headers = http_client.last_headers
-    processor = ResponseProcessor(messages, headers)
+    content_buffer = []
+    usage_data = None
+    model_name = None
 
     async def generate():
-        for chunk in response:
-            chunk_text = processor.process_chunk(chunk)
-            if chunk_text:
-                yield chunk_text
+        try:
+            for chunk in response:
+                chunk_dict = chunk.model_dump()
+                
+                # Collect content for logging
+                if chunk.choices and chunk.choices[0].delta.content:
+                    content_buffer.append(chunk.choices[0].delta.content)
+                
+                # Capture model name and usage if present
+                if hasattr(chunk, 'model'):
+                    nonlocal model_name
+                    model_name = chunk.model
+                if hasattr(chunk, 'usage') and chunk.usage:
+                    nonlocal usage_data
+                    usage_data = chunk.usage.model_dump()
+
+                # Send chunk exactly as received from OpenAI
+                yield f"data: {json.dumps(chunk_dict)}\n\n"
+
+        except Exception as e:
+            logging.error(f"Streaming error: {str(e)}")
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        finally:
+            # Log to EventHub before sending DONE
+            try:
+                end_time = time.time()
+                latency_ms = int((end_time - start_time) * 1000)
+                
+                if content_buffer:  # Only log if we have content
+                    log_data = {
+                        "type": "stream_completion",
+                        "content": "".join(content_buffer),
+                        "model": model_name or "unknown",
+                        "usage": usage_data,  # This might be None if no usage data was received
+                        "prompt": messages,
+                        "region": headers.get("x-ms-region", "unknown"),
+                        "latency_ms": latency_ms
+                    }
+                    logging.info(f"Logging streaming completion to EventHub: {json.dumps(log_data)}")
+                    log_to_eventhub(log_data)
+            except Exception as e:
+                logging.error(f"Failed to log to EventHub: {str(e)}")
+            
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(
         generate(),
         media_type='text/event-stream',
         headers={
+            'Content-Type': 'text/event-stream',
             'Cache-Control': 'no-cache',
             'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no'
+            'X-Accel-Buffering': 'no',
+            'x-ms-region': headers.get("x-ms-region", "unknown")
         }
     )
-
-class ResponseProcessor:
-    def __init__(self, messages, headers):
-        self.response_body = []
-        self.all_chunks = []
-        self.messages = messages
-        self.region = headers.get("x-ms-region", "unknown")
-        self.start_time = time.time()
-
-    def process_chunk(self, chunk):
-        """Process individual chunk from OpenAI response"""
-        try:
-            # Handle usage data
-            if hasattr(chunk, 'usage') and chunk.usage is not None:
-                end_time = time.time()
-                latency_ms = int((end_time - self.start_time) * 1000)  # Convert to milliseconds
-                complete_message = ''.join(self.all_chunks)
-                
-                log_data = {
-                    "type": "stream_completion",
-                    "content": complete_message,
-                    "usage": chunk.usage.model_dump(),
-                    "model": chunk.model,
-                    "prompt": self.messages,
-                    "region": self.region,
-                    "latency_ms": latency_ms
-                }
-                log_to_eventhub(log_data)
-
-                # Handle usage data
-                logging.info(f"Complete message: {complete_message}")
-                logging.info(f"Usage details:")
-                logging.info(f"  Completion tokens: {chunk.usage.completion_tokens}")
-                logging.info(f"  Prompt tokens: {chunk.usage.prompt_tokens}")
-                logging.info(f"  Total tokens: {chunk.usage.total_tokens}")
-                chunk_dict = chunk.model_dump()
-                return f"data: {json.dumps(chunk_dict)}\n\ndata: [DONE]\n\n"
-
-            # Handle content filter results
-            if not chunk.choices and hasattr(chunk, 'prompt_filter_results'):
-                return None
-
-            # Check if chunk has choices
-            if not chunk.choices:
-                logging.warning(f"Received chunk without choices: {chunk}")
-                return None
-
-            delta = chunk.choices[0].delta
-            
-            # Handle content updates
-            if hasattr(delta, 'content') and delta.content is not None:
-                self.all_chunks.append(delta.content)
-                chunk_dict = chunk.model_dump()
-                return f"data: {json.dumps(chunk_dict)}\n\n"
-            
-            # Handle role messages (usually first message)
-            elif hasattr(delta, 'role'):
-                chunk_dict = chunk.model_dump()
-                return f"data: {json.dumps(chunk_dict)}\n\n"
-            
-            return None
-
-        except Exception as e:
-            logging.error(f"Error processing chunk: {str(e)}")
-            logging.error(f"Problematic chunk: {chunk}")
-            return None
