@@ -12,6 +12,8 @@ This is to resolve Event Hub Logging for [APIM SSE Streaming limitation](https:/
 - Azure OpenAI service instance
 
 ### Environment Variables
+Copy `local.settings.sample.json` to `local.settings.json` and set the following environment variables:
+or
 Set the following environment variables in your Azure Function App:
 
 ```bash
@@ -28,6 +30,16 @@ az functionapp config appsettings set \
 ```
 
 > Note: `PYTHON_ENABLE_INIT_INDEXING=1` is required for proper Python module initialization in Azure Functions.
+
+## Demo
+
+### Function Start
+![Start](./assets/FNSSEStart.gif)
+### API Call
+![API Call](./assets/FNSSEAPI.gif)
+### Event Hub
+![Event Hub](./assets/FNSSEEventHub.gif)
+
 
 ## Usage
 

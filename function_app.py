@@ -8,7 +8,6 @@ from datetime import datetime
 import httpx
 from typing import Any, Dict
 import time
-import asyncio
 from azurefunctions.extensions.http.fastapi import Request, StreamingResponse
 from fastapi.responses import JSONResponse
 
@@ -118,8 +117,7 @@ def log_to_eventhub(log_data: dict):
 
         # Create producer
         producer = EventHubProducerClient.from_connection_string(
-            conn_str=os.environ["AZURE_EVENTHUB_CONN_STR"],
-            eventhub_name=os.environ.get("AZURE_EVENTHUB_NAME", "openai-logs")
+            conn_str=os.environ["AZURE_EVENTHUB_CONN_STR"]
         )
 
         # Add timestamp to log data
