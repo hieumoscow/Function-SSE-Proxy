@@ -11,7 +11,7 @@ import time
 from azurefunctions.extensions.http.fastapi import Request, StreamingResponse
 from fastapi.responses import JSONResponse
 
-app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
+app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
 class HeaderCaptureClient(httpx.Client):
     def __init__(self, *args, **kwargs):
