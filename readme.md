@@ -141,7 +141,7 @@ The function automatically logs completion details to Azure Event Hub for both s
         "prompt_tokens": 25,
         "total_tokens": 162
     },
-    "model": "gpt-4",
+    "model": "gpt-4o",
     "prompt": [...],
     "region": "Australia East",
     "latency_ms": 1306,
