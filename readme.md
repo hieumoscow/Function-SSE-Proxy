@@ -154,18 +154,42 @@ The function automatically logs completion details to Azure Event Hub for both s
 {
     "type": "stream_completion",
     "content": "Singapore is a vibrant city-state...",
+    "model": "gpt-4o",
     "usage": {
         "completion_tokens": 137,
         "prompt_tokens": 25,
         "total_tokens": 162
     },
-    "model": "gpt-4",
-    "prompt": [...],
+    "prompt": [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant."
+        },
+        {
+            "role": "user",
+            "content": "Tell me about Singapore in 1 sentence"
+        }
+    ],
     "region": "Australia East",
-    "latency_ms": 1306,
+    "latency_ms": 2650,
+    "time_to_first_chunk_ms": 150,
+    "streaming_duration_ms": 2500,
     "timestamp": "2024-11-13T06:59:30.584946"
 }
 ```
+
+### Understanding Timing Metrics
+For streaming responses, three timing metrics are captured:
+
+- `time_to_first_chunk_ms`: Time from request start until first token (includes queue time and model startup)
+- `streaming_duration_ms`: Duration of token generation (actual model inference time)
+- `latency_ms`: Total request duration (time_to_first_chunk_ms + streaming_duration_ms)
+
+These metrics help identify:
+- Queue waiting time in different regions
+- Model warm-up and startup time
+- Token generation speed
+- Overall request latency
 
 ## Dependencies
 - Python 3.9+

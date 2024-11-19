@@ -171,11 +171,19 @@ async def process_openai_stream(response, messages, http_client, start_time):
     content_buffer = []
     usage_data = None
     model_name = None
+    first_chunk_time = None
 
     async def generate():
         try:
             for chunk in response:
                 chunk_dict = chunk.model_dump()
+                current_time = time.time()
+                
+                # Track first chunk timing
+                nonlocal first_chunk_time
+                if first_chunk_time is None:
+                    first_chunk_time = current_time
+
                 
                 # Collect content for logging
                 if chunk.choices and chunk.choices[0].delta.content:
@@ -191,25 +199,31 @@ async def process_openai_stream(response, messages, http_client, start_time):
 
                 # Send chunk exactly as received from OpenAI
                 yield f"data: {json.dumps(chunk_dict)}\n\n"
+                                
 
         except Exception as e:
             logging.error(f"Streaming error: {str(e)}")
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
         finally:
+            # Calculate timing metrics
+            last_chunk_time = time.time()
+            time_to_first_chunk = int((first_chunk_time - start_time) * 1000) if first_chunk_time else None
+            streaming_duration = int((last_chunk_time - first_chunk_time) * 1000) if first_chunk_time else None
+            latency_ms = int((last_chunk_time - start_time) * 1000)
+
             # Log to EventHub before sending DONE
             try:
-                end_time = time.time()
-                latency_ms = int((end_time - start_time) * 1000)
-                
                 if content_buffer:  # Only log if we have content
                     log_data = {
                         "type": "stream_completion",
                         "content": "".join(content_buffer),
                         "model": model_name or "unknown",
-                        "usage": usage_data,  # This might be None if no usage data was received
+                        "usage": usage_data,
                         "prompt": messages,
                         "region": headers.get("x-ms-region", "unknown"),
-                        "latency_ms": latency_ms
+                        "latency_ms": latency_ms,
+                        "time_to_first_chunk_ms": time_to_first_chunk,
+                        "streaming_duration_ms": streaming_duration,
                     }
                     logging.info(f"Logging streaming completion to EventHub: {json.dumps(log_data)}")
                     log_to_eventhub(log_data)
