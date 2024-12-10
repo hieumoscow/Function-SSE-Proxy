@@ -10,8 +10,14 @@ from typing import Any, Dict
 import time
 from azurefunctions.extensions.http.fastapi import Request, StreamingResponse
 from fastapi.responses import JSONResponse
+from eventhub_cosmos_blueprint import blueprint
+from budget_manager import CustomBudgetManager
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
+app.register_functions(blueprint) 
+
+# Initialize budget manager
+budget_manager = CustomBudgetManager()
 
 class HeaderCaptureClient(httpx.Client):
     def __init__(self, *args, **kwargs):
@@ -43,7 +49,16 @@ async def aoaifn(req: Request) -> StreamingResponse:
     try:
         # Get request parameters
         request_body = await req.json()
-        logging.info(f"Request body: {json.dumps(request_body)}")  # Log the request body
+        logging.info(f"Request body: {json.dumps(request_body)}")
+        
+        # Extract user ID from request body or use default
+        user_id = request_body.get("user", "default_user")
+        
+        # Setup budget for user if not already set
+        try:
+            budget_manager.setup_user_budget(user_id=user_id, total_budget=10.0)
+        except Exception as e:
+            logging.warning(f"Budget already exists for user {user_id}: {str(e)}")
         
         # Get API version from query parameters
         api_version = req.query_params.get("api-version")
@@ -137,6 +152,19 @@ def process_openai_sync(response, messages, headers, latency_ms):
     """Process non-streaming response from OpenAI"""
     try:
         content = response.choices[0].message.content
+        user_id = messages[0].get("user", "default_user") if messages else "default_user"
+        
+        # Track cost using budget manager
+        try:
+            current_cost = budget_manager.track_request_cost(
+                user_id=user_id,
+                model=response.model,
+                input_text=str(messages),
+                output_text=content
+            )
+            logging.info(f"Current cost for user {user_id}: {current_cost}")
+        except Exception as e:
+            logging.error(f"Error tracking cost: {str(e)}")
         
         if response.usage:
             log_data = {
@@ -146,7 +174,9 @@ def process_openai_sync(response, messages, headers, latency_ms):
                 "model": response.model,
                 "prompt": messages,
                 "region": headers.get("x-ms-region", "unknown"),
-                "latency_ms": latency_ms
+                "latency_ms": latency_ms,
+                "user_id": user_id,
+                "current_cost": current_cost if 'current_cost' in locals() else None
             }
             log_to_eventhub(log_data)
 
@@ -172,6 +202,7 @@ async def process_openai_stream(response, messages, http_client, start_time):
     usage_data = None
     model_name = None
     first_chunk_time = None
+    user_id = messages[0].get("user", "default_user") if messages else "default_user"
 
     async def generate():
         try:
@@ -214,9 +245,24 @@ async def process_openai_stream(response, messages, http_client, start_time):
             # Log to EventHub before sending DONE
             try:
                 if content_buffer:  # Only log if we have content
+                    full_content = "".join(content_buffer)
+                    
+                    # Track cost using budget manager for streaming response
+                    try:
+                        if model_name:  # Only track if we got the model information
+                            current_cost = budget_manager.track_request_cost(
+                                user_id=user_id,
+                                model=model_name,
+                                input_text=str(messages),
+                                output_text=full_content
+                            )
+                            logging.info(f"Current cost for user {user_id}: {current_cost}")
+                    except Exception as e:
+                        logging.error(f"Error tracking streaming cost: {str(e)}")
+                    
                     log_data = {
                         "type": "stream_completion",
-                        "content": "".join(content_buffer),
+                        "content": full_content,
                         "model": model_name or "unknown",
                         "usage": usage_data,
                         "prompt": messages,
@@ -224,6 +270,8 @@ async def process_openai_stream(response, messages, http_client, start_time):
                         "latency_ms": latency_ms,
                         "time_to_first_chunk_ms": time_to_first_chunk,
                         "streaming_duration_ms": streaming_duration,
+                        "user_id": user_id,
+                        "current_cost": current_cost if 'current_cost' in locals() else None
                     }
                     logging.info(f"Logging streaming completion to EventHub: {json.dumps(log_data)}")
                     log_to_eventhub(log_data)
