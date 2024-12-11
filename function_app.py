@@ -12,6 +12,7 @@ from azurefunctions.extensions.http.fastapi import Request, StreamingResponse
 from fastapi.responses import JSONResponse
 from eventhub_cosmos_blueprint import blueprint
 from budget_manager import CustomBudgetManager
+from azure.identity import DefaultAzureCredential
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 app.register_functions(blueprint) 
@@ -124,29 +125,43 @@ async def aoaifn(req: Request) -> StreamingResponse:
         )
 
 def log_to_eventhub(log_data: dict):
-    """Log data to Azure Event Hub"""
     try:
-        if "AZURE_EVENTHUB_CONN_STR" not in os.environ:
-            logging.info("Event Hub connection string not configured, skipping event hub logging")
-            return
-
-        # Create producer
-        producer = EventHubProducerClient.from_connection_string(
-            conn_str=os.environ["AZURE_EVENTHUB_CONN_STR"]
-        )
-
-        # Add timestamp to log data
-        log_data["timestamp"] = datetime.utcnow().isoformat()
-        event_data = EventData(json.dumps(log_data))
-
-        # Send event using the correct method
-        with producer:
-            batch = producer.create_batch()
-            batch.add(event_data)
-            producer.send_batch(batch)
-            
+        # Check if connection string is available
+        eventhub_conn = os.getenv("AZURE_EVENTHUB_CONN_STR")
+        
+        if eventhub_conn:
+            # Use connection string
+            producer = EventHubProducerClient.from_connection_string(
+                conn_str=eventhub_conn,
+                eventhub_name=os.environ["AZURE_EVENTHUB_NAME"]
+            )
+        else:
+            # Use MSI
+            credential = DefaultAzureCredential()
+            fully_qualified_namespace = f"{os.environ['AZURE_EVENTHUB_NAMESPACE']}.servicebus.windows.net"
+            producer = EventHubProducerClient(
+                fully_qualified_namespace=fully_qualified_namespace,
+                eventhub_name=os.environ["AZURE_EVENTHUB_NAME"],
+                credential=credential
+            )
+        
+        # Create a batch
+        event_data_batch = producer.create_batch()
+        
+        # Add event to batch
+        event_data_batch.add(EventData(json.dumps(log_data)))
+        
+        # Send the batch of events to the event hub
+        producer.send_batch(event_data_batch)
+        
+        logging.info(f"Successfully sent event to Event Hub: {log_data}")
+        
     except Exception as e:
-        logging.error(f"Failed to log to Event Hub: {str(e)}")
+        logging.error(f"Error sending event to Event Hub: {str(e)}")
+        raise
+    finally:
+        # Close the producer
+        producer.close()
 
 def process_openai_sync(response, messages, headers, latency_ms):
     """Process non-streaming response from OpenAI"""

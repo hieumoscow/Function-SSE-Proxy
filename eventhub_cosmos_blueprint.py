@@ -9,23 +9,54 @@ import json
 import os
 import azure.functions as func
 import uuid
+from azure.identity import DefaultAzureCredential, ManagedIdentityCredential
 
 
 blueprint = func.Blueprint()
 
 
-@blueprint.event_hub_message_trigger(arg_name="events", event_hub_name=os.environ["AZURE_EVENTHUB_NAME"],
-                               connection="AZURE_EVENTHUB_CONN_STR") 
-@blueprint.cosmos_db_output(arg_name="outputDocument", database_name="ApimAOAI",    
-    container_name="ApimAOAI", connection="CosmosDBConnection")
+# Check if connection strings are available
+eventhub_conn = os.getenv("AZURE_EVENTHUB_CONN_STR", "")
+cosmos_conn = os.getenv("CosmosDBConnection", "")
+
+
+# Use connection string if available, otherwise use MSI
+if eventhub_conn:
+    eventhub_trigger_args = {"connection": "AZURE_EVENTHUB_CONN_STR"}
+else:
+    eventhub_trigger_args = {
+        "credential": DefaultAzureCredential(),
+        "event_hub_namespace": os.environ["AZURE_EVENTHUB_NAMESPACE"],
+    }
+
+
+if cosmos_conn:
+    cosmos_output_args = {"connection": "CosmosDBConnection"}
+else:
+    cosmos_output_args = {
+        "credential": DefaultAzureCredential(),
+        "account_endpoint": os.environ["COSMOS_ENDPOINT"]
+    }
+
+
+@blueprint.event_hub_message_trigger(
+    arg_name="events", 
+    event_hub_name=os.environ["AZURE_EVENTHUB_NAME"],
+    **eventhub_trigger_args
+) 
+@blueprint.cosmos_db_output(
+    arg_name="outputDocument",
+    database_name="ApimAOAI",    
+    container_name="ApimAOAI",
+    **cosmos_output_args
+)
 def eventhub_trigger(events: func.EventHubEvent, outputDocument: func.Out[func.Document]):
     try:
         # Process the event
         event_body = events.get_body().decode('utf-8')
         event_data = json.loads(event_body)
         
-        # # Add new uuid as id
-        # check if id already exists, if not, generate a new one
+        # Add new uuid as id if not exists
         if "id" not in event_data:
             event_data["id"] = str(uuid.uuid4())
         
