@@ -1,9 +1,30 @@
+output "resource_group_name" {
+  value = azurerm_resource_group.rg.name
+}
+
 output "function_app_name" {
-  value = azurerm_linux_function_app.func.name
+  value = azapi_resource.func.name
 }
 
 output "function_app_default_hostname" {
-  value = azurerm_linux_function_app.func.default_hostname
+  value = data.azurerm_linux_function_app.func_wrapper.default_hostname
+}
+
+output "storage_account_name" {
+  value = azurerm_storage_account.sa.name
+}
+
+output "storage_account_primary_access_key" {
+  value     = azurerm_storage_account.sa.primary_access_key
+  sensitive = true
+}
+
+output "eventhub_name" {
+  value = azurerm_eventhub.eh.name
+}
+
+output "eventhub_namespace" {
+  value = azurerm_eventhub_namespace.ehns.name
 }
 
 output "eventhub_connection_string" {
@@ -15,12 +36,27 @@ output "cosmos_db_endpoint" {
   value = azurerm_cosmosdb_account.cosmos.endpoint
 }
 
-output "storage_account_name" {
-  value = azurerm_storage_account.sa.name
+output "cosmos_db_primary_key" {
+  value     = azurerm_cosmosdb_account.cosmos.primary_key
+  sensitive = true
+}
+
+output "application_insights_connection_string" {
+  value     = azurerm_application_insights.appinsights.connection_string
+  sensitive = true
+}
+
+output "application_insights_instrumentation_key" {
+  value     = azurerm_application_insights.appinsights.instrumentation_key
+  sensitive = true
 }
 
 output "function_app_principal_id" {
-  value = azurerm_linux_function_app.func.identity[0].principal_id
+  value = data.azurerm_linux_function_app.func_wrapper.identity[0].principal_id
+}
+
+output "deployment_storage_container_url" {
+  value = "${azurerm_storage_account.sa.primary_blob_endpoint}${azurerm_storage_container.deployment.name}"
 }
 
 output "apim_name" {

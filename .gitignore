@@ -141,3 +141,5 @@ blog.md
 .terraform.lock.hcl
 terraform.tfstate
 terraform.tfstate.backup
+function.zip
+*.tfvars

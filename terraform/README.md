@@ -2,7 +2,7 @@
 
 This Terraform configuration deploys the following Azure resources:
 
-- Azure Function App (Linux, Python 3.10)
+- Azure Function App (Linux, Python 3.11)
 - Azure Storage Account (for Function App)
 - Azure Event Hub Namespace and Event Hub
 - Azure Cosmos DB Account with SQL API

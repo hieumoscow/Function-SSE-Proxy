@@ -30,3 +30,24 @@ variable "tags" {
     Project     = "FNSSE"
   }
 }
+
+variable "azure_openai_key" {
+  description = "Azure OpenAI API Key"
+  type        = string
+  sensitive   = true
+}
+
+variable "azure_openai_api_version" {
+  description = "Azure OpenAI API Version"
+  type        = string
+}
+
+variable "azure_openai_base_url" {
+  description = "Azure OpenAI Base URL"
+  type        = string
+}
+
+variable "azure_openai_model" {
+  description = "Azure OpenAI Model Name"
+  type        = string
+}

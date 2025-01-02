@@ -3,16 +3,12 @@ import logging
 import json
 import os
 from openai import AzureOpenAI
-from azure.eventhub import EventHubProducerClient, EventData
-from datetime import datetime
 import httpx
-from typing import Any, Dict
 import time
 from azurefunctions.extensions.http.fastapi import Request, StreamingResponse
 from fastapi.responses import JSONResponse
 from eventhub_cosmos_blueprint import blueprint
 from budget_manager import CustomBudgetManager
-from azure.identity import DefaultAzureCredential
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 app.register_functions(blueprint) 
@@ -39,8 +35,14 @@ def create_openai_client():
         http_client=http_client,
     ), http_client
 
-@app.route(route="openai/deployments/{deployment_name}/chat/completions", methods=[func.HttpMethod.POST])
-async def aoaifn(req: Request) -> StreamingResponse:
+@app.function_name(name="chat_completion_proxy")
+@app.route(route="openai/deployments/{deployment_name}/chat/completions", 
+          methods=[func.HttpMethod.POST],
+          auth_level=func.AuthLevel.FUNCTION)
+@app.event_hub_output(arg_name="event",
+                     event_hub_name=os.environ["AZURE_EVENTHUB_NAME"],
+                     connection="EventHubConnection")
+async def chat_completion_proxy(req: Request, event: func.Out[str]) -> StreamingResponse:
     """
     Azure OpenAI Function that proxies requests to Azure OpenAI API with streaming support.
     Matches the official Azure OpenAI API signature.
@@ -84,6 +86,15 @@ async def aoaifn(req: Request) -> StreamingResponse:
         messages = request_body["messages"]
         stream = request_body.get("stream", False)
         
+        # Log the incoming request
+        # request_log = {
+        #     "type": "request",
+        #     "timestamp": datetime.utcnow().isoformat(),
+        #     "messages": messages,
+        #     "user_id": user_id
+        # }
+        # event.set(json.dumps(request_log))
+        
         # Filter out only the stream parameter for extra args
         extra_args = {
             k: v for k, v in request_body.items() 
@@ -103,7 +114,7 @@ async def aoaifn(req: Request) -> StreamingResponse:
                 stream=True,
                 **extra_args  # This will now include stream_options
             )
-            return await process_openai_stream(response, messages, http_client, start_time)
+            return await process_openai_stream(response, messages, http_client, start_time, event)
         else:
             response = client.chat.completions.create(
                 model=deployment_name,
@@ -115,7 +126,7 @@ async def aoaifn(req: Request) -> StreamingResponse:
             end_time = time.time()
             latency_ms = int((end_time - start_time) * 1000)
             headers = http_client.last_headers
-            return process_openai_sync(response, messages, headers, latency_ms)
+            return await process_openai_sync(response, messages, headers, latency_ms, event)
 
     except Exception as e:
         logging.error(f"Error in proxy function: {str(e)}")
@@ -124,46 +135,7 @@ async def aoaifn(req: Request) -> StreamingResponse:
             status_code=500
         )
 
-def log_to_eventhub(log_data: dict):
-    try:
-        # Check if connection string is available
-        eventhub_conn = os.getenv("AZURE_EVENTHUB_CONN_STR")
-        
-        if eventhub_conn:
-            # Use connection string
-            producer = EventHubProducerClient.from_connection_string(
-                conn_str=eventhub_conn,
-                eventhub_name=os.environ["AZURE_EVENTHUB_NAME"]
-            )
-        else:
-            # Use MSI
-            credential = DefaultAzureCredential()
-            fully_qualified_namespace = f"{os.environ['AZURE_EVENTHUB_NAMESPACE']}.servicebus.windows.net"
-            producer = EventHubProducerClient(
-                fully_qualified_namespace=fully_qualified_namespace,
-                eventhub_name=os.environ["AZURE_EVENTHUB_NAME"],
-                credential=credential
-            )
-        
-        # Create a batch
-        event_data_batch = producer.create_batch()
-        
-        # Add event to batch
-        event_data_batch.add(EventData(json.dumps(log_data)))
-        
-        # Send the batch of events to the event hub
-        producer.send_batch(event_data_batch)
-        
-        logging.info(f"Successfully sent event to Event Hub: {log_data}")
-        
-    except Exception as e:
-        logging.error(f"Error sending event to Event Hub: {str(e)}")
-        raise
-    finally:
-        # Close the producer
-        producer.close()
-
-def process_openai_sync(response, messages, headers, latency_ms):
+async def process_openai_sync(response, messages, headers, latency_ms, event: func.Out[str]):
     """Process non-streaming response from OpenAI"""
     try:
         content = response.choices[0].message.content
@@ -193,7 +165,7 @@ def process_openai_sync(response, messages, headers, latency_ms):
                 "user_id": user_id,
                 "current_cost": current_cost if 'current_cost' in locals() else None
             }
-            log_to_eventhub(log_data)
+            event.set(json.dumps(log_data))
 
         # Return JSONResponse directly
         return JSONResponse(
@@ -210,7 +182,7 @@ def process_openai_sync(response, messages, headers, latency_ms):
             status_code=500
         )
 
-async def process_openai_stream(response, messages, http_client, start_time):
+async def process_openai_stream(response, messages, http_client, start_time, event: func.Out[str]):
     """Process streaming response from OpenAI"""
     headers = http_client.last_headers
     content_buffer = []
@@ -289,7 +261,7 @@ async def process_openai_stream(response, messages, http_client, start_time):
                         "current_cost": current_cost if 'current_cost' in locals() else None
                     }
                     logging.info(f"Logging streaming completion to EventHub: {json.dumps(log_data)}")
-                    log_to_eventhub(log_data)
+                    event.set(json.dumps(log_data))
             except Exception as e:
                 logging.error(f"Failed to log to EventHub: {str(e)}")
             

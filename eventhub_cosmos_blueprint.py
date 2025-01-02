@@ -9,35 +9,16 @@ import json
 import os
 import azure.functions as func
 import uuid
-from azure.identity import DefaultAzureCredential, ManagedIdentityCredential
+from azure.identity import DefaultAzureCredential
 
 
 blueprint = func.Blueprint()
 
 
-# Check if connection strings are available
-eventhub_conn = os.getenv("AZURE_EVENTHUB_CONN_STR", "")
-cosmos_conn = os.getenv("CosmosDBConnection", "")
 
+eventhub_trigger_args = {"connection": "EventHubConnection"}
 
-# Use connection string if available, otherwise use MSI
-if eventhub_conn:
-    eventhub_trigger_args = {"connection": "AZURE_EVENTHUB_CONN_STR"}
-else:
-    eventhub_trigger_args = {
-        "credential": DefaultAzureCredential(),
-        "event_hub_namespace": os.environ["AZURE_EVENTHUB_NAMESPACE"],
-    }
-
-
-if cosmos_conn:
-    cosmos_output_args = {"connection": "CosmosDBConnection"}
-else:
-    cosmos_output_args = {
-        "credential": DefaultAzureCredential(),
-        "account_endpoint": os.environ["COSMOS_ENDPOINT"]
-    }
-
+cosmos_output_args = {"connection": "CosmosDBConnection"}
 
 @blueprint.event_hub_message_trigger(
     arg_name="events", 

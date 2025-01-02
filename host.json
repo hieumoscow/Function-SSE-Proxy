@@ -6,13 +6,28 @@
         "isEnabled": true,
         "excludedTypes": "Request"
       }
+    },
+    "logLevel": {
+      "default": "Information",
+      "Host.Results": "Debug",
+      "Function": "Debug",
+      "Host.Aggregator": "Debug",
+      "Microsoft.Azure.WebJobs.Script": "Debug"
     }
   },
-  "logLevel": {
-    "default": "Information",
-    "Host.Results": "Information",
-    "Function": "Information",
-    "Host.Aggregator": "Information"
+  "extensions": {
+    "eventHubs": {
+      "maxBatchSize": 64,
+      "prefetchCount": 256,
+      "batchCheckpointFrequency": 1
+    },
+    "cosmosDB": {
+      "connectionMode": "Gateway",
+      "protocol": "Https",
+      "leaseOptions": {
+        "leasePrefix": "openai-logs"
+      }
+    }
   },
   "extensionBundle": {
     "id": "Microsoft.Azure.Functions.ExtensionBundle",
