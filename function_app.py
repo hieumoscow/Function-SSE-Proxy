@@ -7,6 +7,7 @@ import httpx
 import time
 from datetime import datetime
 from azure.eventhub import EventHubProducerClient, EventData
+from azure.identity import DefaultAzureCredential
 from azurefunctions.extensions.http.fastapi import Request, StreamingResponse
 from fastapi.responses import JSONResponse
 from eventhub_cosmos_blueprint import blueprint
@@ -37,30 +38,58 @@ def create_openai_client():
         http_client=http_client,
     ), http_client
 
+# Initialize Event Hub producer client
+eventhub_producer = None
+def get_eventhub_producer():
+    global eventhub_producer
+    if eventhub_producer is None:
+        try:
+            eventhub_name = os.environ.get("AZURE_EVENTHUB_NAME", "eh-fnsse-w7yorq49")
+            namespace = os.environ.get("EventHubConnection_fullyQualifiedNamespace", "ehns-fnsse-w7yorq49.servicebus.windows.net")
+            
+            # Try connection string first (local development)
+            if "EventHubConnection" in os.environ:
+                eventhub_producer = EventHubProducerClient.from_connection_string(
+                    conn_str=os.environ["EventHubConnection"]
+                )
+                logging.info("Created Event Hub producer using connection string")
+            # Fall back to MSI (Azure deployment)
+            else:
+                credential = DefaultAzureCredential()
+                eventhub_producer = EventHubProducerClient(
+                    fully_qualified_namespace=namespace,
+                    eventhub_name=eventhub_name,
+                    credential=credential
+                )
+                logging.info(f"Created Event Hub producer using MSI authentication: {namespace}/{eventhub_name}")
+        except Exception as e:
+            logging.error(f"Failed to create Event Hub producer: {str(e)}")
+            return None
+    return eventhub_producer
+
 def log_to_eventhub(log_data: dict):
     """Log data to Azure Event Hub"""
     try:
-        if "EventHubConnection" not in os.environ:
-            logging.info("Event Hub connection string not configured, skipping event hub logging")
+        producer = get_eventhub_producer()
+        if producer is None:
+            logging.info("Event Hub producer not available, skipping event hub logging")
             return
-
-        # Create producer
-        producer = EventHubProducerClient.from_connection_string(
-            conn_str=os.environ["EventHubConnection"]
-        )
 
         # Add timestamp to log data
         log_data["timestamp"] = datetime.utcnow().isoformat()
         event_data = EventData(json.dumps(log_data))
 
         # Send event using the correct method
-        with producer:
-            batch = producer.create_batch()
-            batch.add(event_data)
-            producer.send_batch(batch)
+        batch = producer.create_batch()
+        batch.add(event_data)
+        producer.send_batch(batch)
             
     except Exception as e:
         logging.error(f"Failed to log to Event Hub: {str(e)}")
+        # If we get a connection error, clear the producer so it can be recreated
+        if "connection" in str(e).lower():
+            global eventhub_producer
+            eventhub_producer = None
 
 @app.function_name(name="chat_completion_proxy")
 @app.route(route="openai/deployments/{deployment_name}/chat/completions", 
@@ -178,22 +207,30 @@ async def process_openai_sync(response, messages, headers, latency_ms):
             logging.error(f"Error tracking cost: {str(e)}")
         
         if response.usage:
+            # Add cost to usage data
+            usage_data = response.usage.model_dump()
+            usage_data["estimated_cost"] = current_cost if 'current_cost' in locals() else None
+            
             log_data = {
                 "type": "completion",
                 "content": content,
-                "usage": response.usage.model_dump(),
+                "usage": usage_data,
                 "model": response.model,
                 "prompt": messages,
                 "region": headers.get("x-ms-region", "unknown"),
                 "latency_ms": latency_ms,
-                "user_id": user_id,
-                "current_cost": current_cost if 'current_cost' in locals() else None
+                "user_id": user_id
             }
             log_to_eventhub(log_data)
 
+        # Modify the response to include cost in usage
+        response_data = response.model_dump()
+        if 'usage' in response_data and 'current_cost' in locals():
+            response_data['usage']['estimated_cost'] = current_cost
+
         # Return JSONResponse directly
         return JSONResponse(
-            content=response.model_dump(),
+            content=response_data,
             headers={
                 'x-ms-region': headers.get("x-ms-region", "unknown")
             }
@@ -271,6 +308,10 @@ async def process_openai_stream(response, messages, http_client, start_time):
                     except Exception as e:
                         logging.error(f"Error tracking streaming cost: {str(e)}")
                     
+                    # Add cost to usage data if available
+                    if usage_data:
+                        usage_data["estimated_cost"] = current_cost if 'current_cost' in locals() else None
+                    
                     log_data = {
                         "type": "stream_completion",
                         "content": full_content,
@@ -281,8 +322,7 @@ async def process_openai_stream(response, messages, http_client, start_time):
                         "latency_ms": latency_ms,
                         "time_to_first_chunk_ms": time_to_first_chunk,
                         "streaming_duration_ms": streaming_duration,
-                        "user_id": user_id,
-                        "current_cost": current_cost if 'current_cost' in locals() else None
+                        "user_id": user_id
                     }
                     logging.info(f"Logging streaming completion to EventHub: {json.dumps(log_data)}")
                     log_to_eventhub(log_data)
