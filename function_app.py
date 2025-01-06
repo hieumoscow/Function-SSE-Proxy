@@ -14,7 +14,7 @@ from eventhub_cosmos_blueprint import blueprint
 from budget_manager import CustomBudgetManager
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
-# app.register_functions(blueprint) 
+app.register_functions(blueprint) 
 
 # Initialize budget manager
 budget_manager = CustomBudgetManager()
