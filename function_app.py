@@ -5,13 +5,15 @@ import os
 from openai import AzureOpenAI
 import httpx
 import time
+from datetime import datetime
+from azure.eventhub import EventHubProducerClient, EventData
 from azurefunctions.extensions.http.fastapi import Request, StreamingResponse
 from fastapi.responses import JSONResponse
 from eventhub_cosmos_blueprint import blueprint
 from budget_manager import CustomBudgetManager
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
-app.register_functions(blueprint) 
+# app.register_functions(blueprint) 
 
 # Initialize budget manager
 budget_manager = CustomBudgetManager()
@@ -35,14 +37,36 @@ def create_openai_client():
         http_client=http_client,
     ), http_client
 
+def log_to_eventhub(log_data: dict):
+    """Log data to Azure Event Hub"""
+    try:
+        if "EventHubConnection" not in os.environ:
+            logging.info("Event Hub connection string not configured, skipping event hub logging")
+            return
+
+        # Create producer
+        producer = EventHubProducerClient.from_connection_string(
+            conn_str=os.environ["EventHubConnection"]
+        )
+
+        # Add timestamp to log data
+        log_data["timestamp"] = datetime.utcnow().isoformat()
+        event_data = EventData(json.dumps(log_data))
+
+        # Send event using the correct method
+        with producer:
+            batch = producer.create_batch()
+            batch.add(event_data)
+            producer.send_batch(batch)
+            
+    except Exception as e:
+        logging.error(f"Failed to log to Event Hub: {str(e)}")
+
 @app.function_name(name="chat_completion_proxy")
 @app.route(route="openai/deployments/{deployment_name}/chat/completions", 
           methods=[func.HttpMethod.POST],
           auth_level=func.AuthLevel.FUNCTION)
-@app.event_hub_output(arg_name="event",
-                     event_hub_name=os.environ["AZURE_EVENTHUB_NAME"],
-                     connection="EventHubConnection")
-async def chat_completion_proxy(req: Request, event: func.Out[str]) -> StreamingResponse:
+async def chat_completion_proxy(req: Request) -> StreamingResponse:
     """
     Azure OpenAI Function that proxies requests to Azure OpenAI API with streaming support.
     Matches the official Azure OpenAI API signature.
@@ -114,7 +138,7 @@ async def chat_completion_proxy(req: Request, event: func.Out[str]) -> Streaming
                 stream=True,
                 **extra_args  # This will now include stream_options
             )
-            return await process_openai_stream(response, messages, http_client, start_time, event)
+            return await process_openai_stream(response, messages, http_client, start_time)
         else:
             response = client.chat.completions.create(
                 model=deployment_name,
@@ -126,7 +150,7 @@ async def chat_completion_proxy(req: Request, event: func.Out[str]) -> Streaming
             end_time = time.time()
             latency_ms = int((end_time - start_time) * 1000)
             headers = http_client.last_headers
-            return await process_openai_sync(response, messages, headers, latency_ms, event)
+            return await process_openai_sync(response, messages, headers, latency_ms)
 
     except Exception as e:
         logging.error(f"Error in proxy function: {str(e)}")
@@ -135,7 +159,7 @@ async def chat_completion_proxy(req: Request, event: func.Out[str]) -> Streaming
             status_code=500
         )
 
-async def process_openai_sync(response, messages, headers, latency_ms, event: func.Out[str]):
+async def process_openai_sync(response, messages, headers, latency_ms):
     """Process non-streaming response from OpenAI"""
     try:
         content = response.choices[0].message.content
@@ -165,7 +189,7 @@ async def process_openai_sync(response, messages, headers, latency_ms, event: fu
                 "user_id": user_id,
                 "current_cost": current_cost if 'current_cost' in locals() else None
             }
-            event.set(json.dumps(log_data))
+            log_to_eventhub(log_data)
 
         # Return JSONResponse directly
         return JSONResponse(
@@ -182,7 +206,7 @@ async def process_openai_sync(response, messages, headers, latency_ms, event: fu
             status_code=500
         )
 
-async def process_openai_stream(response, messages, http_client, start_time, event: func.Out[str]):
+async def process_openai_stream(response, messages, http_client, start_time):
     """Process streaming response from OpenAI"""
     headers = http_client.last_headers
     content_buffer = []
@@ -261,7 +285,7 @@ async def process_openai_stream(response, messages, http_client, start_time, eve
                         "current_cost": current_cost if 'current_cost' in locals() else None
                     }
                     logging.info(f"Logging streaming completion to EventHub: {json.dumps(log_data)}")
-                    event.set(json.dumps(log_data))
+                    log_to_eventhub(log_data)
             except Exception as e:
                 logging.error(f"Failed to log to EventHub: {str(e)}")
             
