@@ -83,7 +83,7 @@ def log_to_eventhub(log_data: dict):
         batch = producer.create_batch()
         batch.add(event_data)
         producer.send_batch(batch)
-            
+        logging.info(f"Successfully logged to Event Hub: {log_data}")
     except Exception as e:
         logging.error(f"Failed to log to Event Hub: {str(e)}")
         # If we get a connection error, clear the producer so it can be recreated
@@ -207,9 +207,10 @@ async def process_openai_sync(response, messages, headers, latency_ms):
             logging.error(f"Error tracking cost: {str(e)}")
         
         if response.usage:
-            # Add cost to usage data
+            # Add cost and user_id to usage data
             usage_data = response.usage.model_dump()
-            usage_data["estimated_cost"] = current_cost if 'current_cost' in locals() else None
+            usage_data["current_cost"] = current_cost if 'current_cost' in locals() else None
+            usage_data["user_id"] = user_id
             
             log_data = {
                 "type": "completion",
@@ -223,10 +224,12 @@ async def process_openai_sync(response, messages, headers, latency_ms):
             }
             log_to_eventhub(log_data)
 
-        # Modify the response to include cost in usage
+        # Modify the response to include cost and user_id in usage
         response_data = response.model_dump()
-        if 'usage' in response_data and 'current_cost' in locals():
-            response_data['usage']['estimated_cost'] = current_cost
+        if 'usage' in response_data:
+            if 'current_cost' in locals():
+                response_data['usage']['current_cost'] = current_cost
+            response_data['usage']['user_id'] = user_id
 
         # Return JSONResponse directly
         return JSONResponse(
@@ -256,14 +259,12 @@ async def process_openai_stream(response, messages, http_client, start_time):
         try:
             for chunk in response:
                 chunk_dict = chunk.model_dump()
-                current_time = time.time()
                 
                 # Track first chunk timing
                 nonlocal first_chunk_time
                 if first_chunk_time is None:
-                    first_chunk_time = current_time
+                    first_chunk_time = time.time()
 
-                
                 # Collect content for logging
                 if chunk.choices and chunk.choices[0].delta.content:
                     content_buffer.append(chunk.choices[0].delta.content)
@@ -272,9 +273,28 @@ async def process_openai_stream(response, messages, http_client, start_time):
                 if hasattr(chunk, 'model'):
                     nonlocal model_name
                     model_name = chunk.model
+
+                # Calculate cost and update usage if present
                 if hasattr(chunk, 'usage') and chunk.usage:
                     nonlocal usage_data
-                    usage_data = chunk.usage.model_dump()
+                    usage_dict = chunk.usage.model_dump()
+                    usage_dict["user_id"] = user_id
+                    
+                    # Track cost when we have usage data
+                    try:
+                        current_cost = budget_manager.track_request_cost(
+                            user_id=user_id,
+                            model=model_name or "gpt-4",
+                            input_text=str(messages),
+                            output_text=''.join(content_buffer)
+                        )
+                        usage_dict["current_cost"] = current_cost
+                    except Exception as e:
+                        logging.error(f"Error tracking streaming cost: {str(e)}")
+                        usage_dict["current_cost"] = None
+                    
+                    chunk_dict['usage'] = usage_dict
+                    usage_data = usage_dict
 
                 # Send chunk exactly as received from OpenAI
                 yield f"data: {json.dumps(chunk_dict)}\n\n"
@@ -294,23 +314,6 @@ async def process_openai_stream(response, messages, http_client, start_time):
             try:
                 if content_buffer:  # Only log if we have content
                     full_content = "".join(content_buffer)
-                    
-                    # Track cost using budget manager for streaming response
-                    try:
-                        if model_name:  # Only track if we got the model information
-                            current_cost = budget_manager.track_request_cost(
-                                user_id=user_id,
-                                model=model_name,
-                                input_text=str(messages),
-                                output_text=full_content
-                            )
-                            logging.info(f"Current cost for user {user_id}: {current_cost}")
-                    except Exception as e:
-                        logging.error(f"Error tracking streaming cost: {str(e)}")
-                    
-                    # Add cost to usage data if available
-                    if usage_data:
-                        usage_data["estimated_cost"] = current_cost if 'current_cost' in locals() else None
                     
                     log_data = {
                         "type": "stream_completion",

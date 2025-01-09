@@ -9,7 +9,6 @@ import json
 import os
 import azure.functions as func
 import uuid
-from azure.identity import DefaultAzureCredential
 
 
 blueprint = func.Blueprint()
