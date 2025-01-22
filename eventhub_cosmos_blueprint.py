@@ -13,8 +13,6 @@ import uuid
 
 blueprint = func.Blueprint()
 
-
-
 eventhub_trigger_args = {"connection": "EventHubConnection"}
 
 cosmos_output_args = {"connection": "CosmosDBConnection"}

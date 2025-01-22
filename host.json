@@ -16,6 +16,10 @@
     }
   },
   "extensions": {
+    "http": {
+      "routePrefix": "api",
+      "maxConcurrentRequests": 100
+    },
     "eventHubs": {
       "maxBatchSize": 64,
       "prefetchCount": 256,

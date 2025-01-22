@@ -137,6 +137,10 @@ resource "azapi_resource" "func" {
       siteConfig = {
         appSettings = [
           {
+            name  = "FUNCTION_APP_URL"
+            value = "https://func-${var.project_name}-${random_string.suffix.result}.azurewebsites.net"
+          },
+          {
             name  = "AZURE_EVENTHUB_NAME"
             value = azurerm_eventhub.eh.name
           },
@@ -167,18 +171,6 @@ resource "azapi_resource" "func" {
           {
             name  = "AzureWebJobsStorage"
             value = azurerm_storage_account.sa.primary_connection_string
-          },
-          {
-            name  = "WEBSITE_RUN_FROM_PACKAGE"
-            value = "1"
-          },
-          {
-            name  = "ENABLE_ORYX_BUILD"
-            value = "true"
-          },
-          {
-            name  = "SCM_DO_BUILD_DURING_DEPLOYMENT"
-            value = "true"
           },
           {
             name  = "FUNCTIONS_EXTENSION_VERSION"
@@ -327,9 +319,18 @@ resource "azurerm_cosmosdb_sql_database" "db" {
   account_name        = azurerm_cosmosdb_account.cosmos.name
 }
 
-# Cosmos DB Container
+# Cosmos DB Container for APIM AOAI
 resource "azurerm_cosmosdb_sql_container" "container" {
   name                = "ApimAOAI"
+  resource_group_name = azurerm_resource_group.rg.name
+  account_name        = azurerm_cosmosdb_account.cosmos.name
+  database_name       = azurerm_cosmosdb_sql_database.db.name
+  partition_key_paths = ["/id"]
+}
+
+# Cosmos DB Container for User Budgets
+resource "azurerm_cosmosdb_sql_container" "user_budgets" {
+  name                = "UserBudgets"
   resource_group_name = azurerm_resource_group.rg.name
   account_name        = azurerm_cosmosdb_account.cosmos.name
   database_name       = azurerm_cosmosdb_sql_database.db.name

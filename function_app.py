@@ -12,9 +12,11 @@ from azurefunctions.extensions.http.fastapi import Request, StreamingResponse
 from fastapi.responses import JSONResponse
 from eventhub_cosmos_blueprint import blueprint
 from budget_manager import CustomBudgetManager
+from budget_blueprint import blueprint as budget_blueprint
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
-app.register_functions(blueprint) 
+# app.register_functions(blueprint) 
+app.register_functions(budget_blueprint)
 
 # Initialize budget manager
 budget_manager = CustomBudgetManager()
@@ -111,12 +113,12 @@ async def chat_completion_proxy(req: Request) -> StreamingResponse:
         user_id = request_body.get("user", "default_user")
         
         # Setup budget for user if not already set
-        try:
-            budget_manager.setup_user_budget(user_id=user_id, total_budget=10.0)
-        except Exception as e:
-            logging.warning(f"Budget already exists for user {user_id}: {str(e)}")
+        # try:
+        #     budget_manager.setup_user_budget(user_id=user_id, total_budget=10.0)
+        # except Exception as e:
+        #     logging.warning(f"Budget already exists for user {user_id}: {str(e)}")
         
-        # Get API version from query parameters
+        # # Get API version from query parameters
         api_version = req.query_params.get("api-version")
         if not api_version:
             return JSONResponse(
