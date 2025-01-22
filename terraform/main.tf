@@ -190,7 +190,7 @@ resource "azapi_resource" "func" {
           },
           {
             name  = "AZURE_OPENAI_KEY"
-            value = "66fa7a677eb7434dae8abd2716e46d35"
+            value = ""
           },
           {
             name  = "AZURE_OPENAI_API_VERSION"
@@ -198,7 +198,7 @@ resource "azapi_resource" "func" {
           },
           {
             name  = "AZURE_OPENAI_BASE_URL"
-            value = "https://openai-aus-hieu.openai.azure.com/"
+            value = "https://<your-instance>.openai.azure.com/"
           },
           {
             name  = "AZURE_OPENAI_MODEL"
