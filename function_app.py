@@ -12,14 +12,29 @@ from azurefunctions.extensions.http.fastapi import Request, StreamingResponse
 from fastapi.responses import JSONResponse
 from eventhub_cosmos_blueprint import blueprint
 from budget_manager import CustomBudgetManager
-from budget_blueprint import blueprint as budget_blueprint
+
+# Global variables
+_budget_manager = None
+
+def get_budget_manager():
+    global _budget_manager
+    if _budget_manager is None:
+        _budget_manager = CustomBudgetManager()
+        # Setup default budget if it doesn't exist
+        DEFAULT_USER = "default_user"
+        DEFAULT_BUDGET = 100.0  # $100 default budget
+        if not _budget_manager.has_budget(DEFAULT_USER):
+            _budget_manager.setup_user_budget(
+                user_id=DEFAULT_USER,
+                total_budget=DEFAULT_BUDGET,
+                duration="daily"
+            )
+            logging.info(f"Set up default budget of ${DEFAULT_BUDGET} for {DEFAULT_USER}")
+    return _budget_manager
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 # app.register_functions(blueprint) 
-app.register_functions(budget_blueprint)
-
-# Initialize budget manager
-budget_manager = CustomBudgetManager()
+# app.register_functions(budget_blueprint)
 
 class HeaderCaptureClient(httpx.Client):
     def __init__(self, *args, **kwargs):
@@ -113,6 +128,7 @@ async def chat_completion_proxy(req: Request) -> StreamingResponse:
         user_id = request_body.get("user", "default_user")
         
         # Setup budget for user if not already set
+        budget_manager = get_budget_manager()
         # try:
         #     budget_manager.setup_user_budget(user_id=user_id, total_budget=10.0)
         # except Exception as e:
@@ -197,6 +213,7 @@ async def process_openai_sync(response, messages, headers, latency_ms):
         user_id = messages[0].get("user", "default_user") if messages else "default_user"
         
         # Track cost using budget manager
+        budget_manager = get_budget_manager()
         try:
             current_cost = budget_manager.track_request_cost(
                 user_id=user_id,
@@ -283,6 +300,7 @@ async def process_openai_stream(response, messages, http_client, start_time):
                     usage_dict["user_id"] = user_id
                     
                     # Track cost when we have usage data
+                    budget_manager = get_budget_manager()
                     try:
                         current_cost = budget_manager.track_request_cost(
                             user_id=user_id,
