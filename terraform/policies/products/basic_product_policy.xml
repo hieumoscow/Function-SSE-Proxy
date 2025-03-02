@@ -1,0 +1,36 @@
+<policies>
+  <inbound>
+    <base />
+    <!-- Define specific quota parameters for this product -->
+    <set-variable name="rateLimitConfig" value="@{
+      // Use product ID as counter key
+      var productId = context.Product?.Id ?? "default_product";
+      
+      var config = new JObject();
+      config["counterKey"] = productId;
+      config["startDate"] = "2025-03-02T00:00:00Z";
+      config["renewal_period"] = 86400;
+      config["explicitEndDate"] = null;
+      config["quota"] = 10;
+      config["input_cost_per_token"] = 0.00003;
+      config["output_cost_per_token"] = 0.00006;
+      
+      return config.ToString();
+    }" />
+    
+    <!-- Include the rate limit config fragment -->
+    <include-fragment fragment-id="RateLimitConfig" />
+  </inbound>
+  
+  <backend>
+    <base />
+  </backend>
+  
+  <outbound>
+    <base />
+  </outbound>
+  
+  <on-error>
+    <base />
+  </on-error>
+</policies>
