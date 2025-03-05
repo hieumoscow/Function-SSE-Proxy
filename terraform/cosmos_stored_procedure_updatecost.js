@@ -1,11 +1,11 @@
-function updateAccumulatedCost(counterKey, model, currentCost, startDate, renewalPeriod, endDate, quota) {
+function updateAccumulatedCost(counterKey, currentCost, startDate, renewalPeriod, endDate, quota) {
   var collection = getContext().getCollection();
   var response = getContext().getResponse();
-  var docId = model + "_" + counterKey;
+  var docId = counterKey;  // Use counterKey as the document ID
 
   // Parameter validation
-  if (!counterKey || !model) {
-    throw new Error("counterKey and model are required parameters");
+  if (!counterKey) {
+    throw new Error("counterKey is a required parameter");
   }
   if (typeof currentCost !== "number" || currentCost < 0) {
     throw new Error("currentCost must be a non-negative number");
@@ -31,7 +31,6 @@ function updateAccumulatedCost(counterKey, model, currentCost, startDate, renewa
         var newDoc = {
           id: docId,
           counterKey: counterKey,
-          model: model,
           accumulatedCost: currentCost,
           startDate: effectiveStart.toISOString(),  // user-defined start date remains unchanged
           renewalPeriod: renewalPeriod || null,
@@ -59,62 +58,68 @@ function updateAccumulatedCost(counterKey, model, currentCost, startDate, renewa
       }
 
       // Check end date; if current time is at or after the end date, reject the update.
-      var effectiveEnd = endDate ? new Date(endDate) : (doc.endDate ? new Date(doc.endDate) : null);
-      if (effectiveEnd && now >= effectiveEnd) {
-        throw new Error("Current time " + nowISO + " is at or after the end date " + effectiveEnd.toISOString());
+      if (doc.endDate && now >= new Date(doc.endDate)) {
+        throw new Error("Current time " + nowISO + " is at or after the end date " + doc.endDate);
       }
 
-      // Renewal logic: if a renewalPeriod is provided, update renewalStart and reset cost as needed.
-      if (renewalPeriod || doc.renewalPeriod) {
-        var period = renewalPeriod || doc.renewalPeriod; // in seconds
-        var periodMs = period * 1000;
-        // Initialize renewalStart if not set.
-        if (!doc.renewalStart) {
-          doc.renewalStart = effectiveStart.getTime();
-        }
+      // Check if we need to reset the accumulated cost due to renewal period
+      var accumulatedCost = doc.accumulatedCost || 0;
+      
+      if (doc.renewalPeriod && doc.renewalStart) {
+        var renewalPeriodMs = doc.renewalPeriod * 1000; // Convert seconds to ms
+        var timeSinceRenewalStart = now.getTime() - doc.renewalStart;
+        var renewalCycles = Math.floor(timeSinceRenewalStart / renewalPeriodMs);
         
-        // Calculate how many full periods have passed
-        var timeSinceStart = now.getTime() - doc.renewalStart;
-        if (timeSinceStart >= periodMs) {
-          var completedPeriods = Math.floor(timeSinceStart / periodMs);
-          doc.renewalStart += completedPeriods * periodMs;
-          doc.accumulatedCost = 0;
+        if (renewalCycles > 0) {
+          // Reset accumulated cost if we've passed at least one renewal cycle
+          accumulatedCost = 0;
+          
+          // Update the renewal start time to the beginning of the current period
+          doc.renewalStart = doc.renewalStart + (renewalCycles * renewalPeriodMs);
         }
       }
-      if (doc.accumulatedCost > quota) {
-        throw new Error("Accumulated cost " + doc.accumulatedCost + " exceeded quota of " + quota);
+      
+      // Update accumulated cost
+      accumulatedCost += currentCost;
+      
+      // Check if the accumulated cost exceeds the quota
+      if (accumulatedCost > quota) {
+        throw new Error("Accumulated cost " + accumulatedCost.toFixed(5) + " exceeded quota of " + quota);
       }
-
-      // Accumulate current cost.
-      var newTotal = (doc.accumulatedCost || 0) + currentCost;
-      doc.accumulatedCost = newTotal;
-
-      // Update document fields.
-      doc.quota = quota;
+      
+      // Update the document
+      doc.accumulatedCost = accumulatedCost;
       doc.lastUpdated = nowISO;
-      if (startDate) {
-        doc.startDate = new Date(startDate).toISOString();
+      
+      // If quota changed, update it
+      if (doc.quota !== quota) {
+        doc.quota = quota;
       }
-      if (renewalPeriod != null) {
+      
+      // If renewal period changed, update it and reset the renewal start time
+      if (renewalPeriod && doc.renewalPeriod !== renewalPeriod) {
         doc.renewalPeriod = renewalPeriod;
+        doc.renewalStart = now.getTime();
       }
-      if (endDate) {
+      
+      // If end date changed, update it
+      if (endDate && doc.endDate !== new Date(endDate).toISOString()) {
         doc.endDate = new Date(endDate).toISOString();
       }
-
-      // Check if accumulated cost exceeds quota
       
-
-      var isUpdated = collection.replaceDocument(
+      // Replace the document
+      var isReplaced = collection.replaceDocument(
         doc._self,
         doc,
-        function (err, updatedDoc) {
+        function (err, replacedDoc) {
           if (err) throw err;
-          response.setBody(updatedDoc);
+          response.setBody(replacedDoc);
         }
       );
-      if (!isUpdated) throw new Error("Failed to update document");
+      
+      if (!isReplaced) throw new Error("Failed to replace document");
     }
   );
+  
   if (!isAccepted) throw new Error("Failed to read document");
 }

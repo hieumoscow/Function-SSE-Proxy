@@ -12,7 +12,7 @@ from azurefunctions.extensions.http.fastapi import Request, StreamingResponse
 from fastapi.responses import JSONResponse
 from eventhub_cosmos_blueprint import blueprint as eventhub_blueprint
 from cosmos_budget_blueprint import blueprint as cosmos_budget_blueprint
-from budget_utils import track_cost_with_stored_procedure, calculate_request_cost, get_cosmos_client
+from budget_utils import track_cost_with_stored_procedure, calculate_request_cost, get_cosmos_client, check_quota_exceeded
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 # app.register_functions(eventhub_blueprint)
@@ -116,12 +116,42 @@ async def chat_completion_proxy(req: Request) -> StreamingResponse:
         
         # Extract counter key from rate limit config or use default
         model_counterkey = "default_product"
+        accumulated_cost = 0
+        quota = 0
         
         # Extract rateLimitConfig if present
         rate_limit_config = request_body.get("rateLimitConfig")
         if rate_limit_config:
             logging.info(f"Rate limit config provided: {json.dumps(rate_limit_config)}")
             model_counterkey = rate_limit_config.get("counterKey", "default_product")
+            quota = rate_limit_config.get("quota", 0)
+            
+            # Check if quota is exceeded before processing
+            quota_check_result = check_quota_exceeded(rate_limit_config)
+            
+            if quota_check_result:
+                # Extract accumulated cost and quota
+                accumulated_cost = quota_check_result.get("accumulated_cost", 0)
+                quota = quota_check_result.get("quota", quota)
+                
+                # Check if quota is exceeded
+                if quota_check_result.get("quota_exceeded", False):
+                    logging.warning(f"Quota exceeded, returning 429: {json.dumps(quota_check_result)}")
+                    return JSONResponse(
+                        content={
+                            "error": {
+                                "code": "QuotaExceeded",
+                                "message": quota_check_result.get("message"),
+                                "details": quota_check_result
+                            }
+                        },
+                        status_code=429,  # Too Many Requests
+                        headers={
+                            'x-counter-key': str(model_counterkey),
+                            'x-accumulated-cost': str(accumulated_cost),
+                            'x-quota': str(quota)
+                        }
+                    )
             
             # Remove rateLimitConfig from the request body before forwarding to OpenAI
             request_body.pop("rateLimitConfig")
@@ -163,24 +193,23 @@ async def chat_completion_proxy(req: Request) -> StreamingResponse:
         # Create chat completion
         if stream:
             response = client.chat.completions.create(
-                model=deployment_name,
+                model=deployment_name,  # Use deployment_name for the OpenAI API call
                 messages=messages,
                 stream=True,
                 **extra_args  # This will now include stream_options
             )
-            return await process_openai_stream(response, messages, http_client, start_time, rate_limit_config, model_counterkey)
+            # Pass model_counterkey for cost tracking
+            return await process_openai_stream(response, messages, http_client, start_time, rate_limit_config, model_counterkey, accumulated_cost, quota)
         else:
             response = client.chat.completions.create(
-                model=deployment_name,
+                model=deployment_name,  # Use deployment_name for the OpenAI API call
                 messages=messages,
                 stream=False,
                 **extra_args
             )
-            # Calculate latency including API call
-            end_time = time.time()
-            latency_ms = int((end_time - start_time) * 1000)
-            headers = http_client.last_headers
-            return await process_openai_sync(response, messages, headers, latency_ms, rate_limit_config, model_counterkey)
+            # Pass model_counterkey for cost tracking
+            latency_ms = int((time.time() - start_time) * 1000)
+            return await process_openai_sync(response, messages, http_client.last_headers, latency_ms, rate_limit_config, model_counterkey, accumulated_cost, quota)
     
     except Exception as e:
         logging.error(f"Error in chat_completion_proxy: {str(e)}")
@@ -189,7 +218,7 @@ async def chat_completion_proxy(req: Request) -> StreamingResponse:
             status_code=500
         )
 
-async def process_openai_sync(response, messages, headers, latency_ms, rate_limit_config=None, model_counterkey=None):
+async def process_openai_sync(response, messages, headers, latency_ms, rate_limit_config=None, model_counterkey=None, accumulated_cost=0, quota=0):
     """Process non-streaming response from OpenAI"""
     try:
         content = response.choices[0].message.content
@@ -212,6 +241,11 @@ async def process_openai_sync(response, messages, headers, latency_ms, rate_limi
                 current_cost=current_cost
             )
             logging.info(f"Cost tracking result: {cost_tracking_result}")
+            
+            # Update accumulated cost and quota if available
+            if cost_tracking_result and isinstance(cost_tracking_result, dict):
+                accumulated_cost = cost_tracking_result.get("accumulatedCost", accumulated_cost)
+                quota = cost_tracking_result.get("quota", quota)
         
         logging.info(f"Current cost for model_counterkey {model_counterkey}: {current_cost}")
         
@@ -243,12 +277,19 @@ async def process_openai_sync(response, messages, headers, latency_ms, rate_limi
             if cost_tracking_result:
                 response_data['usage']['cost_tracking'] = cost_tracking_result
 
+        # Prepare response headers with cost tracking information
+        response_headers = {
+            'x-ms-region': headers.get("x-ms-region", "unknown"),
+            'x-counter-key': str(model_counterkey),
+            'x-current-cost': str(current_cost),
+            'x-accumulated-cost': str(accumulated_cost),
+            'x-quota': str(quota)
+        }
+
         # Return JSONResponse directly
         return JSONResponse(
             content=response_data,
-            headers={
-                'x-ms-region': headers.get("x-ms-region", "unknown")
-            }
+            headers=response_headers
         )
 
     except Exception as e:
@@ -258,7 +299,7 @@ async def process_openai_sync(response, messages, headers, latency_ms, rate_limi
             status_code=500
         )
 
-async def process_openai_stream(response, messages, http_client, start_time, rate_limit_config=None, model_counterkey=None):
+async def process_openai_stream(response, messages, http_client, start_time, rate_limit_config=None, model_counterkey=None, accumulated_cost=0, quota=0):
     """Process streaming response from OpenAI"""
     headers = http_client.last_headers
     content_buffer = []
@@ -309,6 +350,11 @@ async def process_openai_stream(response, messages, http_client, start_time, rat
                             model=model_name,
                             current_cost=current_cost
                         )
+                        # Update accumulated cost and quota if available
+                        if cost_tracking_result and isinstance(cost_tracking_result, dict):
+                            nonlocal accumulated_cost, quota
+                            accumulated_cost = cost_tracking_result.get("accumulatedCost", accumulated_cost)
+                            quota = cost_tracking_result.get("quota", quota)
                     
                     usage_dict["current_cost"] = current_cost
                     if cost_tracking_result:
@@ -363,6 +409,9 @@ async def process_openai_stream(response, messages, http_client, start_time, rat
             'Cache-Control': 'no-cache',
             'Connection': 'keep-alive',
             'X-Accel-Buffering': 'no',
-            'x-ms-region': headers.get("x-ms-region", "unknown")
+            'x-ms-region': headers.get("x-ms-region", "unknown"),
+            'x-counter-key': str(model_counterkey),
+            'x-accumulated-cost': str(accumulated_cost),
+            'x-quota': str(quota)
         }
     )

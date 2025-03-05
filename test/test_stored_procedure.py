@@ -47,40 +47,61 @@ class CosmosStoredProcedureTester:
 
     def execute_stored_procedure(self, 
                                counter_key: str, 
-                               model: str, 
                                current_cost: float, 
                                quota: float, 
                                start_date: Optional[str] = None, 
                                renewal_period: Optional[int] = None,
-                               end_date: Optional[str] = None) -> Dict[str, Any]:
+                               end_date: Optional[str] = None,
+                               model: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Execute the updateAccumulatedCost stored procedure
+        
+        Args:
+            counter_key: The counter key for the document
+            current_cost: The cost to add to the accumulated cost
+            quota: The quota limit
+            start_date: Optional start date (ISO format)
+            renewal_period: Optional renewal period in seconds
+            end_date: Optional end date (ISO format)
+            model: Optional model name (for logging only, not used in document ID)
+            
+        Returns:
+            The result from the stored procedure
+        """
         if start_date is None:
             start_date = datetime.utcnow().isoformat() + "Z"
             
         try:
+            # Make sure current_cost is a float
+            current_cost_float = float(current_cost)
+            
+            # Ensure parameters are in the correct order and of the correct type
             params = [
-                str(counter_key), 
-                str(model), 
-                float(current_cost), 
-                str(start_date), 
-                int(renewal_period) if renewal_period is not None else None,
-                str(end_date) if end_date is not None else None,
-                float(quota)
+                str(counter_key),                                  # counterKey as string
+                current_cost_float,                               # currentCost as float
+                str(start_date) if start_date else None,          # startDate as string or null
+                int(renewal_period) if renewal_period is not None else None,  # renewalPeriod as int or null
+                str(end_date) if end_date else None,              # endDate as string or null
+                float(quota)                                      # quota as float
             ]
             
-            doc_id = f"{model}_{counter_key}"
+            # Log the parameters for debugging
+            logger.info(f"Executing stored procedure with params: {params}")
+            
+            # Use counter_key as both document ID and partition key
             return self.container.scripts.execute_stored_procedure(
                 sproc="updateAccumulatedCost",
                 params=params,
-                partition_key=doc_id
+                partition_key=counter_key
             )
             
         except Exception as e:
+            logger.error(f"Error executing stored procedure: {str(e)}")
             raise
 
     def run_quota_test(self, 
                       test_name: str,
                       counter_key: str,
-                      model: str,
                       quota: float,
                       cost_generator: Callable[[], float],
                       renewal_period: Optional[int] = None,
@@ -89,7 +110,7 @@ class CosmosStoredProcedureTester:
                       max_iterations: int = 100,
                       expected_error: Optional[str] = None) -> None:
         logger.info(f"\n=== TEST {test_name} ===")
-        logger.info(f"Model: {model}, Key: {counter_key}")
+        logger.info(f"Key: {counter_key}")
         logger.info(f"Quota: ${quota:.2f}")
         if start_date:
             logger.info(f"Start Date: {start_date}")
@@ -108,7 +129,6 @@ class CosmosStoredProcedureTester:
             try:
                 result = self.execute_stored_procedure(
                     counter_key=counter_key,
-                    model=model,
                     current_cost=current_cost,
                     quota=quota,
                     start_date=start_date,
@@ -177,14 +197,13 @@ class CosmosStoredProcedureTester:
         
         logger.info("=" * 50)
 
-    def delete_test_document(self, counter_key: str, model: str) -> None:
+    def delete_test_document(self, counter_key: str) -> None:
         """Delete a test document to clean up after tests"""
-        doc_id = f"{model}_{counter_key}"
         try:
-            self.container.delete_item(item=doc_id, partition_key=doc_id)
-            logger.info(f"Deleted test document: {doc_id}")
+            self.container.delete_item(item=counter_key, partition_key=counter_key)
+            logger.info(f"Deleted test document: {counter_key}")
         except Exception as e:
-            logger.info(f"Could not delete document {doc_id}: {str(e)}")
+            logger.info(f"Could not delete document {counter_key}: {str(e)}")
 
 def main():
     tester = CosmosStoredProcedureTester()
@@ -193,7 +212,6 @@ def main():
     tester.run_quota_test(
         "Daily Renewal Test",
         counter_key="test_daily",
-        model="gpt-4",
         quota=10.0,
         cost_generator=CostGenerator.fixed(2.0),
         renewal_period=86400,
@@ -205,7 +223,6 @@ def main():
     tester.run_quota_test(
         "Monthly Quota Test",
         counter_key="test_monthly",
-        model="gpt-4",
         quota=50.0,
         cost_generator=CostGenerator.random(10.0, 20.0),
         renewal_period=2592000,
@@ -218,7 +235,6 @@ def main():
     tester.run_quota_test(
         "Future Start Date Test",
         counter_key="test_future",
-        model="gpt-4",
         quota=10.0,
         cost_generator=CostGenerator.fixed(1.0),
         start_date=future_start,
@@ -231,7 +247,6 @@ def main():
     tester.run_quota_test(
         "Past End Date Test",
         counter_key="test_past_end",
-        model="gpt-4",
         quota=10.0,
         cost_generator=CostGenerator.fixed(1.0),
         end_date=past_end,
@@ -244,7 +259,6 @@ def main():
     tester.run_quota_test(
         "Renewal Reset Test",
         counter_key="test_renewal",
-        model="gpt-4",
         quota=5.0,
         cost_generator=CostGenerator.fixed(2.0),
         start_date=past_start,
@@ -257,7 +271,6 @@ def main():
     tester.run_quota_test(
         "Exponential Cost Growth Test",
         counter_key="test_exponential",
-        model="gpt-4",
         quota=20.0,
         cost_generator=CostGenerator.exponential(1.0, 2.0),
         max_iterations=6,
@@ -268,7 +281,6 @@ def main():
     tester.run_quota_test(
         "Zero Quota Test",
         counter_key="test_zero_quota",
-        model="gpt-4",
         quota=0.0,
         cost_generator=CostGenerator.fixed(1.0),
         max_iterations=1,
@@ -279,7 +291,6 @@ def main():
     tester.run_quota_test(
         "Negative Cost Test",
         counter_key="test_negative_cost",
-        model="gpt-4",
         quota=10.0,
         cost_generator=CostGenerator.fixed(-1.0),
         max_iterations=1,
@@ -290,7 +301,6 @@ def main():
     tester.run_quota_test(
         "Small Cost Accumulation Test",
         counter_key="test_small_cost",
-        model="gpt-4",
         quota=1.0,
         cost_generator=CostGenerator.fixed(0.1),
         max_iterations=15,
@@ -302,7 +312,6 @@ def main():
     tester.run_quota_test(
         "Multiple Models Test - Part 1",
         counter_key="test_multi_model",
-        model="gpt-4",
         quota=5.0,
         cost_generator=CostGenerator.fixed(1.0),
         max_iterations=3
@@ -312,7 +321,6 @@ def main():
     tester.run_quota_test(
         "Multiple Models Test - Part 2",
         counter_key="test_multi_model",
-        model="gpt-3.5-turbo",
         quota=5.0,
         cost_generator=CostGenerator.fixed(1.0),
         max_iterations=3
@@ -323,7 +331,6 @@ def main():
     tester.run_quota_test(
         "Short Renewal Period Test",
         counter_key="test_short_renewal",
-        model="gpt-4",
         quota=3.0,
         cost_generator=CostGenerator.fixed(1.0),
         renewal_period=short_renewal,
@@ -336,7 +343,6 @@ def main():
     tester.run_quota_test(
         "Update Quota Test - Part 1",
         counter_key="test_update_quota",
-        model="gpt-4",
         quota=3.0,
         cost_generator=CostGenerator.fixed(1.0),
         max_iterations=2
@@ -346,7 +352,6 @@ def main():
     tester.run_quota_test(
         "Update Quota Test - Part 2",
         counter_key="test_update_quota",
-        model="gpt-4",
         quota=10.0,
         cost_generator=CostGenerator.fixed(1.0),
         max_iterations=5
@@ -356,7 +361,6 @@ def main():
     tester.run_quota_test(
         "Exact Quota Test",
         counter_key="test_exact_quota",
-        model="gpt-4",
         quota=5.0,
         cost_generator=CostGenerator.fixed(1.0),
         max_iterations=5
@@ -367,37 +371,19 @@ def main():
     tester.run_quota_test(
         "Future End Date Test",
         counter_key="test_future_end",
-        model="gpt-4",
         quota=5.0,
         cost_generator=CostGenerator.fixed(1.0),
         end_date=future_end,
         max_iterations=3
     )
     
-    # Clean up test documents (optional)
-    # Uncomment to enable cleanup after tests
-    """
-    test_keys = [
-        ("test_daily", "gpt-4"),
-        ("test_monthly", "gpt-4"),
-        ("test_future", "gpt-4"),
-        ("test_past_end", "gpt-4"),
-        ("test_renewal", "gpt-4"),
-        ("test_exponential", "gpt-4"),
-        ("test_zero_quota", "gpt-4"),
-        ("test_negative_cost", "gpt-4"),
-        ("test_small_cost", "gpt-4"),
-        ("test_multi_model", "gpt-4"),
-        ("test_multi_model", "gpt-3.5-turbo"),
-        ("test_short_renewal", "gpt-4"),
-        ("test_update_quota", "gpt-4"),
-        ("test_exact_quota", "gpt-4"),
-        ("test_future_end", "gpt-4")
-    ]
-    
-    for key, model in test_keys:
-        tester.delete_test_document(key, model)
-    """
+    # Clean up test documents
+    for key in ["test_daily", "test_monthly", "test_future", "test_past_end", 
+                "test_renewal", "test_exponential", "test_zero_quota", 
+                "test_negative_cost", "test_small_cost", "test_multi_model", 
+                "test_short_renewal", "test_update_quota", "test_exact_quota", 
+                "test_future_end"]:
+        tester.delete_test_document(key)
     
     return 0
 

@@ -87,23 +87,101 @@ def get_cosmos_client():
             raise
     return _cosmos_client
 
+def check_quota_exceeded(rate_limit_config):
+    """
+    Check if the quota is exceeded for the given counter key
+    
+    Args:
+        rate_limit_config (dict): Configuration for rate limiting
+        
+    Returns:
+        dict: None if document doesn't exist or error, dict with quota exceeded info if quota exceeded,
+             or dict with document info (accumulated_cost, quota, counter_key) if quota not exceeded
+    """
+    try:
+        if not rate_limit_config:
+            logging.info("No rate limit config provided, skipping quota check")
+            return None
+            
+        counter_key = rate_limit_config.get("counterKey")
+        if not counter_key:
+            logging.warning("No counterKey provided in rateLimitConfig, skipping quota check")
+            return None
+            
+        quota = rate_limit_config.get("quota")
+        if not quota:
+            logging.warning("No quota provided in rateLimitConfig, skipping quota check")
+            return None
+            
+        # Get Cosmos DB client and container
+        cosmos_client = get_cosmos_client()
+        database = cosmos_client.get_database_client("ApimAOAI")
+        container = database.get_container_client("UserBudgets")
+        
+        # Use just the counter_key to query documents
+        logging.info(f"Checking quota for counter_key={counter_key}")
+        
+        try:
+            # Try to read the document directly using counterKey as ID
+            try:
+                doc = container.read_item(item=counter_key, partition_key=counter_key)
+                
+                # Check if accumulated cost exceeds quota
+                accumulated_cost = doc.get("accumulatedCost", 0)
+                quota_value = doc.get("quota", float(quota))
+                
+                logging.info(f"Found document: counter_key={counter_key}, accumulated_cost={accumulated_cost}, quota={quota_value}")
+                
+                if accumulated_cost >= quota_value:
+                    logging.warning(f"Quota exceeded for counter_key={counter_key}: accumulated_cost={accumulated_cost}, quota={quota_value}")
+                    return {
+                        "error": "QuotaExceeded",
+                        "message": f"Rate limit quota exceeded. Accumulated cost: {accumulated_cost}, Quota: {quota_value}",
+                        "status_code": 429,  # Too Many Requests
+                        "accumulated_cost": accumulated_cost,
+                        "quota": quota_value,
+                        "counter_key": counter_key,
+                        "quota_exceeded": True
+                    }
+                
+                # Return document info even when quota is not exceeded
+                return {
+                    "accumulated_cost": accumulated_cost,
+                    "quota": quota_value,
+                    "counter_key": counter_key,
+                    "quota_exceeded": False
+                }
+            except Exception as e:
+                # Document might not exist yet, which is fine
+                logging.info(f"Document not found or other error: {str(e)}")
+                return None
+        except Exception as e:
+            # Error querying documents
+            logging.error(f"Error querying documents: {str(e)}")
+            return None
+    except Exception as e:
+        logging.error(f"Error checking quota: {str(e)}")
+        return None
+
 def track_cost_with_stored_procedure(rate_limit_config, model, current_cost):
     """
     Track cost using the Cosmos DB stored procedure
     
     Args:
         rate_limit_config (dict): Configuration for rate limiting
-        model (str): Model name
+        model (str): Model name (used for logging only, not for document ID)
         current_cost (float): Cost of the current request
         
     Returns:
-        dict: Result from the stored procedure
+        dict: Result from the stored procedure or error information
     """
     try:
         if not rate_limit_config:
             logging.info("No rate limit config provided, skipping cost tracking")
             return None
-            
+        logging.info(f"model provided: {model}")
+        logging.info(f"current_cost provided: {current_cost}")
+        logging.info(f"Rate limit config provided: {json.dumps(rate_limit_config)}")
         counter_key = rate_limit_config.get("counterKey")
         if not counter_key:
             logging.warning("No counterKey provided in rateLimitConfig, skipping cost tracking")
@@ -125,23 +203,58 @@ def track_cost_with_stored_procedure(rate_limit_config, model, current_cost):
         container = database.get_container_client("UserBudgets")
         
         # Log the parameters being sent to the stored procedure
-        logging.info(f"Executing stored procedure with params: counter_key={counter_key}, model={model}, " +
+        logging.info(f"Executing stored procedure with params: counter_key={counter_key}, " +
                     f"current_cost={current_cost}, start_date={start_date}, renewal_period={renewal_period}, " +
-                    f"explicit_end_date={explicit_end_date}, quota={quota}")
+                    f"explicit_end_date={explicit_end_date}, quota={quota}, model={model} (for logging only)")
         
-        # Execute stored procedure with the document ID as the partition key
-        # The stored procedure constructs the document ID as model + "_" + counterKey
-        result = container.scripts.execute_stored_procedure(
-            sproc="updateAccumulatedCost",
-            params=[counter_key, model, current_cost, start_date, renewal_period, explicit_end_date, quota],
-            partition_key=model + "_" + counter_key  # Match the document ID construction in the stored procedure
-        )
-        
-        logging.info(f"Cost tracking result: {json.dumps(result)}")
-        return result
+        # The stored procedure now uses counterKey as the document ID
+        try:
+            # Execute the stored procedure
+            result = container.scripts.execute_stored_procedure(
+                sproc="updateAccumulatedCost",
+                params=[counter_key, current_cost, start_date, renewal_period, explicit_end_date, quota],
+                partition_key=counter_key
+            )
+            
+            logging.info(f"Stored procedure result: {result}")
+            
+            # Ensure we return a dictionary with the accumulated cost and quota
+            if isinstance(result, dict):
+                return result
+            else:
+                # If result is not a dictionary, try to create one with the expected structure
+                try:
+                    # Try to read the document to get the current accumulated cost and quota
+                    doc = container.read_item(item=counter_key, partition_key=counter_key)
+                    return {
+                        "accumulatedCost": doc.get("accumulatedCost", 0),
+                        "quota": doc.get("quota", float(quota)),
+                        "counterKey": counter_key,
+                        "result": result
+                    }
+                except Exception as e:
+                    logging.error(f"Error reading document after stored procedure: {str(e)}")
+                    return {
+                        "accumulatedCost": 0,
+                        "quota": float(quota),
+                        "counterKey": counter_key,
+                        "result": result
+                    }
+        except Exception as e:
+            logging.error(f"Error executing stored procedure: {str(e)}")
+            return {
+                "error": str(e),
+                "counterKey": counter_key,
+                "accumulatedCost": 0,
+                "quota": float(quota)
+            }
     except Exception as e:
-        logging.error(f"Error tracking cost with stored procedure: {str(e)}")
-        return {"error": str(e)}
+        logging.error(f"Error in track_cost_with_stored_procedure: {str(e)}")
+        return {
+            "error": str(e),
+            "accumulatedCost": 0,
+            "quota": 0
+        }
 
 def calculate_request_cost(model, input_text, output_text, rate_limit_config=None):
     """
